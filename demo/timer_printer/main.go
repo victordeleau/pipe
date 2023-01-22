@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/victordeleau/pipe/pkg"
 	"log"
 	"time"
@@ -9,22 +10,29 @@ import (
 
 func main() {
 
-	pipeline := pipe.NewPipe()
-
 	timerStage, printerStage := newTimer(), newPrinter()
-	pipeline.Add(timerStage, printerStage)
+	fmt.Printf("timer stage %s - printer stage %s\n", timerStage.Id(), printerStage.Id())
 
+	pipeline := pipe.NewPipe()
 	err := pipeline.Add(timerStage, printerStage).Link(timerStage.Output, printerStage.Input)
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
 
-	if err = pipeline.Compile(); err != nil {
+	compiled, err := pipeline.Compile(16)
+	if err != nil {
 		log.Fatalf(err.Error())
 	}
+
+	compiled.Log()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	pipeline.Start(ctx)
+	compiled.Start(ctx)
+
+	select {
+	case <-ctx.Done():
+		break
+	}
 }

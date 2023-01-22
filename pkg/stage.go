@@ -8,7 +8,7 @@ import (
 const bufferSize uint = 128
 
 type StageInterface interface {
-	To(via ReceiveChannel) *ToStage
+	To(via ChannelInterface) *ToStage
 	Pipeline(ctx context.Context)
 	Id() string
 }
@@ -36,7 +36,7 @@ func (s *Stage) Id() string {
 	return s.id
 }
 
-func (s *Stage) To(via ReceiveChannel) *ToStage {
+func (s *Stage) To(via ChannelInterface) *ToStage {
 	return &ToStage{
 		StageInterface: s,
 		via:            via,
@@ -45,5 +45,5 @@ func (s *Stage) To(via ReceiveChannel) *ToStage {
 
 type ToStage struct {
 	StageInterface
-	via ReceiveChannel
+	via ChannelInterface
 }

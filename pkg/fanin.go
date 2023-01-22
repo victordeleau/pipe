@@ -1,15 +1,12 @@
-package lib
+package pipe
 
-import (
-	"github.com/victordeleau/pipe/pkg"
-	"sync"
-)
+import "sync"
 
-func Fanin[T any](inputs ...pipe.Chan[T]) <-chan T {
+func Fanin[T any](inputs ...Channel[T]) <-chan T {
 	var wg sync.WaitGroup
 	out := make(chan T)
-	fan := func(c pipe.Chan[T]) {
-		for n := range c.Buffer {
+	fan := func(c Channel[T]) {
+		for n := range *c.Buffer {
 			out <- n
 		}
 		wg.Done()

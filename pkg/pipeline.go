@@ -3,6 +3,8 @@ package pipe
 import (
 	"context"
 	"fmt"
+	"github.com/google/uuid"
+	"reflect"
 )
 
 type PipelineInterface interface {
@@ -13,26 +15,38 @@ type PipelineInterface interface {
 	Stop() <-chan struct{}
 }
 
+// StageWrapper wraps the StageInterface with information regarding the stages is feeds.
+type StageWrapper struct {
+	StageInterface
+	isFeedingStages set
+	OutputChannels  map[string]*ChannelWrapper
+	InputChannels   map[string]*ChannelWrapper
+}
+
+// ChannelWrapper wraps the ChannelInterface with information regarding the channels it feeds,
+// and the stage it belongs to.
+type ChannelWrapper struct {
+	ChannelInterface
+	isFeedingChannels set
+	parentStage       string
+}
+
+func (c *ChannelWrapper) isConsumed() bool {
+	return len(c.isFeedingChannels) != 0
+}
+
 type Pipeline struct {
-	links      map[string][]ReceiveChannel
-	stages     map[string][]StageInterface
-	isConsumed map[string]bool
-
-	isCompiled bool
-
-	visited map[string]bool
-	stack   map[string]bool
-
-	option Option
+	id       string
+	stages   map[string]*StageWrapper   // stage ID indexing stages
+	channels map[string]*ChannelWrapper // channel ID indexing channels
+	option   Option
 }
 
 func NewPipe(option ...Option) *Pipeline {
 	pipeline := &Pipeline{
-		links:      make(map[string][]ReceiveChannel),
-		stages:     make(map[string][]StageInterface),
-		isConsumed: make(map[string]bool),
-		visited:    make(map[string]bool),
-		stack:      make(map[string]bool),
+		id:       uuid.New().String(),
+		stages:   make(map[string]*StageWrapper),
+		channels: make(map[string]*ChannelWrapper),
 	}
 	if len(option) != 0 {
 		pipeline.option = option[0]
@@ -42,106 +56,186 @@ func NewPipe(option ...Option) *Pipeline {
 
 func (p *Pipeline) Add(stages ...StageInterface) *Pipeline {
 
-	// add stages
 	for _, s := range stages {
-		if _, ok := p.stages[s.Id()]; !ok {
-			p.stages[s.Id()] = append(p.stages[s.Id()], s)
+
+		// add stage
+		if _, ok := p.stages[s.Id()]; ok {
+			continue // already added
+		}
+		p.stages[s.Id()] = &StageWrapper{
+			StageInterface:  s,
+			isFeedingStages: make(set),
+			InputChannels:   make(map[string]*ChannelWrapper),
+			OutputChannels:  make(map[string]*ChannelWrapper),
+		}
+
+		// add channels
+		stageType, stageValue := reflect.TypeOf(s).Elem(), reflect.ValueOf(s).Elem()
+		for i := 0; i < stageType.NumField(); i++ {
+
+			if stageType.Field(i).Type.Implements(reflect.TypeOf((*ChannelInterface)(nil)).Elem()) {
+
+				channel := stageValue.Field(i).Interface().(ChannelInterface)
+
+				channelWrapper := &ChannelWrapper{
+					ChannelInterface:  channel,
+					isFeedingChannels: make(set),
+					parentStage:       s.Id(),
+				}
+
+				p.channels[channelWrapper.Id()] = channelWrapper
+
+				if channel.Type() == ReceiveChannelType {
+					p.stages[s.Id()].InputChannels[channel.Id()] = channelWrapper
+				} else { // then SendChannelType
+					p.stages[s.Id()].OutputChannels[channel.Id()] = channelWrapper
+				}
+			}
 		}
 	}
-
-	// TODO set that stage outputs must be consumed
 
 	return p
 }
 
 // Link configure stage 'to' to receive from the provided channels.
-// The provided channels must appear as fields with type 'ChannelInterface' in the 'to' main.
-func (p *Pipeline) Link(from ReceiveChannel, to ...ReceiveChannel) error {
+// The provided channels must appear as fields with type 'ChannelInterface' in the 'to' pipeline.
+func (p *Pipeline) Link(from ChannelInterface, to ...ChannelInterface) error {
 
 	if p == nil {
 		return nil
 	}
 
+	var found bool
+
+	// is the channel is found, then it means the stage it belongs to was added
+	fromChannelWrapper, fromStageAdded := p.channels[from.Id()]
+
 	for _, t := range to {
 
-		// add link to main
-		if _, ok := (p.links)[from.Id()]; !ok {
-			(p.links)[from.Id()] = []ReceiveChannel{t}
-		} else {
-			(p.links)[from.Id()] = append((p.links)[t.Id()], t)
+		if from.Type() != SendChannelType {
+			return fmt.Errorf("from channel is not a receive channel")
 		}
 
-		t.ReceiveFrom(from) // TODO set inputs in 'to' stage
-
-		// set that 'from' channel is consumed to later detect un-consumed channels
-		if isConsumed, ok := p.isConsumed[t.Id()]; !ok {
-			return fmt.Errorf("'from' channel does not belong to any known stage")
-		} else if !isConsumed {
-			p.isConsumed[t.Id()] = true
+		if t.Type() != ReceiveChannelType {
+			return fmt.Errorf("to channel %s is not a receive channel", t.Id())
 		}
+
+		if _, found = p.channels[t.Id()]; !found {
+			return fmt.Errorf("'to' channel %s belongs to a stage was not previously added", t.Id())
+		}
+
+		if fromStageAdded {
+			fromStage := p.stages[fromChannelWrapper.parentStage]
+			fromStage.isFeedingStages[p.channels[t.Id()].parentStage] = struct{}{}
+			p.stages[fromChannelWrapper.parentStage] = fromStage
+
+			fromChannelWrapper.isFeedingChannels[t.Id()] = struct{}{}
+		}
+
+		if err := t.ReceiveFrom(from); err != nil {
+			return err
+		}
+	}
+
+	if fromStageAdded {
+		p.channels[from.Id()] = fromChannelWrapper
 	}
 
 	return nil
 }
 
 // Compile the current graph and verify its validity.
-func (p *Pipeline) Compile() error {
+func (p *Pipeline) Compile(bufferSize uint) (*CompiledPipeline, error) {
 
 	// check that there is no cycle
-	p.visited = make(map[string]bool, len(p.stages)+1)
-	p.stack = make(map[string]bool, len(p.stages)+1)
+	if err := p.isCycle(); err != nil {
+		return nil, err
+	}
+
+	// check no open-ended
+	for channelId, channelWrapper := range p.channels {
+		if !channelWrapper.isConsumed() && channelWrapper.Type() == SendChannelType {
+			return nil, fmt.Errorf("channel %s is not consumed by any pipeline", channelId)
+		}
+	}
+
+	// get topological order
+	compiled := &CompiledPipeline{
+		Pipeline:         p,
+		topologicalOrder: p.topologicalSort(),
+	}
+
+	// from beginning to end, initialize
+	for _, stageId := range compiled.topologicalOrder {
+		for _, outputChannel := range compiled.stages[stageId].OutputChannels {
+			outputChannel.Make(bufferSize)
+		}
+	}
+
+	return compiled, nil
+}
+
+func (p *Pipeline) isCycleUtility(nodeId string, visited set, stack set) bool {
+
+	visited[nodeId], stack[nodeId] = struct{}{}, struct{}{}
+
+	for stageId, _ := range p.stages[nodeId].isFeedingStages {
+		if _, found := visited[stageId]; !found {
+			if p.isCycleUtility(stageId, visited, stack) {
+				return true
+			} else if _, found = stack[stageId]; found {
+				return true
+			}
+		}
+	}
+
+	delete(stack, nodeId)
+	return false
+}
+
+func (p *Pipeline) isCycle() error {
+
+	visited, stack := make(set, len(p.stages)+1), make(set, len(p.stages)+1)
+
 	for nodeId, _ := range p.stages {
-		if _, ok := p.visited[nodeId]; !ok {
-			if p.isCycle(nodeId) {
+		if _, ok := visited[nodeId]; !ok {
+			if p.isCycleUtility(nodeId, visited, stack) {
 				return fmt.Errorf("cycle detected in graph")
 			}
 		}
 	}
 
-	// check no open-ended
-	for id, isConsumed := range p.isConsumed {
-		if !isConsumed {
-			return fmt.Errorf("channel %s is not consumed by any main", id)
-		}
-	}
-
-	// get topological order
-
-	// from beginning to end, initialize
-
-	p.isCompiled = true
-
 	return nil
 }
 
-func (p *Pipeline) isCycle(nodeId string) bool {
+func (p *Pipeline) topologicalSortUtility(stageId string, visited *set, order *[]string) {
 
-	p.visited[nodeId], p.stack[nodeId] = true, true
+	(*visited)[stageId] = struct{}{}
 
-	for _, neighbor := range p.stages[nodeId] {
-		if !p.visited[neighbor.Id()] {
-			if p.isCycle(neighbor.Id()) {
-				return true
-			} else if p.stack[neighbor.Id()] == true {
-				return true
-			}
+	for neighborId, _ := range p.stages[stageId].isFeedingStages {
+		if _, ok := (*visited)[neighborId]; !ok {
+			p.topologicalSortUtility(neighborId, visited, order)
 		}
 	}
 
-	p.stack[nodeId] = false
-	return false
+	*order = append(*order, stageId)
 }
 
-func (p *Pipeline) Start(ctx context.Context) {
+func (p *Pipeline) topologicalSort() []string {
 
-	if !p.isCompiled {
-		return
+	visited := make(set, len(p.stages))
+	order := make([]string, 0, len(p.stages))
+
+	for stageId, _ := range p.stages {
+		if _, ok := visited[stageId]; !ok {
+			p.topologicalSortUtility(stageId, &visited, &order)
+		}
 	}
 
-	return
-}
+	reversedStack := make([]string, 0, len(p.stages))
+	for i := len(order) - 1; i >= 0; i-- {
+		reversedStack = append(reversedStack, order[i])
+	}
 
-func (p *Pipeline) Stop() <-chan struct{} {
-	done := make(chan struct{}, 1)
-	return done
+	return reversedStack
 }
