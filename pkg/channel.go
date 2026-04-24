@@ -30,7 +30,9 @@ type ChannelInterface interface {
 
 type ReceiveChannel[T any] interface {
 	ChannelInterface
-	Receive(ctx context.Context) *T
+	// Receive returns (v, true) when a value was received from the channel.
+	// It returns (zero, false) when ctx is done or the channel is closed.
+	Receive(ctx context.Context) (T, bool)
 }
 
 type SendChannel[T any] interface {
@@ -79,12 +81,16 @@ func (c *Channel[T]) Send(payload ...T) {
 	}
 }
 
-func (c *Channel[T]) Receive(ctx context.Context) *T {
+func (c *Channel[T]) Receive(ctx context.Context) (T, bool) {
+	var zero T
 	select {
 	case <-ctx.Done():
-		return nil
-	case v := <-*c.Buffer:
-		return &v
+		return zero, false
+	case v, ok := <-*c.Buffer:
+		if !ok {
+			return zero, false
+		}
+		return v, true
 	}
 }
 

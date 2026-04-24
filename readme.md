@@ -40,7 +40,11 @@ func newMultiplier() *Multiplier {
 
 func (m *Multiplier) Pipeline(ctx context.Context) {
 	for {
-		m.Output.Send(m.Input.Receive(ctx) * 2)
+		v, ok := m.Input.Receive(ctx)
+		if !ok {
+			return
+		}
+		m.Output.Send(v * 2)
 	}
 }
 ```

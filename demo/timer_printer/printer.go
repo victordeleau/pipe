@@ -21,10 +21,10 @@ func newPrinter() *Printer {
 func (p *Printer) Pipeline(ctx context.Context) {
 	fmt.Print("printer starting\n")
 	for {
-		v := p.Input.Receive(ctx)
-		if v == nil {
+		v, ok := p.Input.Receive(ctx)
+		if !ok {
 			return
 		}
-		fmt.Printf("printer received %v\n", *v)
+		fmt.Printf("printer received %v\n", v)
 	}
 }
