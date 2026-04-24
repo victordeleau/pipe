@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/victordeleau/pipe/pkg"
 	"log"
 	"time"
+
+	pipe "github.com/victordeleau/pipe/pkg"
 )
 
 func main() {
@@ -30,9 +31,6 @@ func main() {
 	defer cancel()
 
 	compiled.Start(ctx)
-
-	select {
-	case <-ctx.Done():
-		break
-	}
+	<-ctx.Done()
+	<-compiled.Stop()
 }

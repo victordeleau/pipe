@@ -1,19 +1,19 @@
 package pipe
 
 import (
-	"context"
 	"fmt"
 	"github.com/google/uuid"
 	"reflect"
 )
 
+// PipelineInterface matches *Pipeline for builders that accept a pipeline as a dependency.
 type PipelineInterface interface {
 	Add(stages ...StageInterface) *Pipeline
 	Link(from ChannelInterface, to ...ChannelInterface) error
-	Compile() error
-	Start(ctx context.Context)
-	Stop() <-chan struct{}
+	Compile(bufferSize uint) (*CompiledPipeline, error)
 }
+
+var _ PipelineInterface = (*Pipeline)(nil)
 
 // StageWrapper wraps the StageInterface with information regarding the stages is feeds.
 type StageWrapper struct {
@@ -113,7 +113,7 @@ func (p *Pipeline) Link(from ChannelInterface, to ...ChannelInterface) error {
 	for _, t := range to {
 
 		if from.Type() != SendChannelType {
-			return fmt.Errorf("from channel is not a receive channel")
+			return fmt.Errorf("from channel must be a send channel")
 		}
 
 		if t.Type() != ReceiveChannelType {

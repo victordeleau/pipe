@@ -21,14 +21,9 @@ func NewStage() *Stage {
 	return &Stage{id: uuid.New().String()}
 }
 
-// Pipeline does nothing
+// Pipeline blocks until ctx is cancelled (default no-op stage).
 func (s *Stage) Pipeline(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		}
-	}
+	<-ctx.Done()
 }
 
 // Id returns the ID of the stage
