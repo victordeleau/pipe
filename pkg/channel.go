@@ -33,6 +33,8 @@ type ReceiveChannel[T any] interface {
 	// Receive returns (v, true) when a value was received from the channel.
 	// It returns (zero, false) when ctx is done or the channel is closed.
 	Receive(ctx context.Context) (T, bool)
+	// ReadChan exposes the stream for range/select without leaking channel internals to helpers like Fanin.
+	ReadChan() <-chan T
 }
 
 type SendChannel[T any] interface {
@@ -42,14 +44,14 @@ type SendChannel[T any] interface {
 
 // Channel is a basic Channel
 type Channel[T any] struct {
-	Buffer      *chan T
+	buffer      *chan T
 	id          string
 	channelType ChannelType
 }
 
 func NewReceiveChannel[T any]() ReceiveChannel[T] {
 	return &Channel[T]{
-		Buffer:      new(chan T),
+		buffer:      new(chan T),
 		id:          uuid.New().String(),
 		channelType: ReceiveChannelType,
 	}
@@ -57,18 +59,18 @@ func NewReceiveChannel[T any]() ReceiveChannel[T] {
 
 func NewSendChannel[T any]() SendChannel[T] {
 	return &Channel[T]{
-		Buffer:      new(chan T),
+		buffer:      new(chan T),
 		id:          uuid.New().String(),
 		channelType: SendChannelType,
 	}
 }
 
 func (c *Channel[T]) Len() int {
-	return len(*c.Buffer)
+	return len(*c.buffer)
 }
 
 func (c *Channel[T]) Make(size uint) {
-	*c.Buffer = make(chan T, size)
+	*c.buffer = make(chan T, size)
 }
 
 func (c *Channel[T]) Id() string {
@@ -77,7 +79,7 @@ func (c *Channel[T]) Id() string {
 
 func (c *Channel[T]) Send(payload ...T) {
 	for _, p := range payload {
-		*c.Buffer <- p
+		*c.buffer <- p
 	}
 }
 
@@ -86,7 +88,7 @@ func (c *Channel[T]) Receive(ctx context.Context) (T, bool) {
 	select {
 	case <-ctx.Done():
 		return zero, false
-	case v, ok := <-*c.Buffer:
+	case v, ok := <-c.ReadChan():
 		if !ok {
 			return zero, false
 		}
@@ -94,12 +96,16 @@ func (c *Channel[T]) Receive(ctx context.Context) (T, bool) {
 	}
 }
 
+func (c *Channel[T]) ReadChan() <-chan T {
+	return *c.buffer
+}
+
 func (c *Channel[T]) ReceiveFrom(channel ChannelInterface) error {
 	channelInferred, ok := channel.(*Channel[T])
 	if !ok {
 		return fmt.Errorf("'from' channel doesn't have the same type as the 'to' channel")
 	}
-	(*c).Buffer = channelInferred.Buffer
+	c.buffer = channelInferred.buffer
 	return nil
 }
 
